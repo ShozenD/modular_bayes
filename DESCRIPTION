@@ -1,0 +1,22 @@
+Package: modularbayes
+Title: Bayesian Modular Inference
+Version: 0.1.0
+Authors@R: 
+    person("First", "Last", , "your.email@example.com", role = c("aut", "cre"),
+           comment = c(ORCID = "YOUR-ORCID-ID"))
+Description: Implementation and exploration of Bayesian modular inference methods.
+    This package provides tools and algorithms for conducting modular Bayesian analysis.
+License: MIT + file LICENSE
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.0.0
+Depends: 
+    R (>= 4.0.0)
+Imports:
+Suggests:
+    testthat (>= 3.0.0),
+    knitr,
+    rmarkdown
+VignetteBuilder: knitr
+URL: https://github.com/yourusername/modular_bayes
+BugReports: https://github.com/yourusername/modular_bayes/issues
