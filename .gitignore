@@ -101,7 +101,7 @@ Temporary Items
 *.swp
 *.swo
 
-# Python files (if using reticulate)
+# Python files
 __pycache__/
 *.py[cod]
 *$py.class
@@ -110,6 +110,7 @@ env/
 venv/
 ENV/
 .venv
+.python-version
 
 # Jupyter Notebook
 .ipynb_checkpoints

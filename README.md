@@ -36,7 +36,33 @@ This project uses [`renv`](https://rstudio.github.io/renv/) for reproducible pac
    renv::restore()
    ```
 
-### For Existing Users
+### Python Setup
+
+This project uses Python 3.12. Follow these steps to create and activate a virtual environment with the required packages.
+
+**Prerequisites:** Python 3.12 installed (verify with `python3.12 --version`).
+
+1. **Create the virtual environment:**
+   ```bash
+   python3.12 -m venv .venv
+   ```
+
+2. **Activate the virtual environment:**
+   ```bash
+   source .venv/bin/activate
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+To deactivate the environment when done:
+```bash
+deactivate
+```
+
+### For Existing R Users
 
 If the `renv.lock` file exists (which tracks all package dependencies), simply restore the environment:
 
