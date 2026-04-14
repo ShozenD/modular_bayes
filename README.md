@@ -4,16 +4,16 @@ A research project on Bayesian modular inference.
 
 ## Overview
 
-This repository contains R code for implementing and exploring Bayesian modular inference methods.
+This repository contains Python and R code for implementing and exploring computational methods for Bayesian modular inference methods.
 
 ## Requirements
 
+- Python (>= 3.12)
 - R (>= 4.0.0)
-- RStudio (recommended)
 
 ## Setup
 
-This project uses [`renv`](https://rstudio.github.io/renv/) for reproducible package management.
+This project uses venv and [`renv`](https://rstudio.github.io/renv/) for reproducible package management.
 
 ### Initial Setup
 
@@ -154,6 +154,20 @@ Log-likelihoods for each module are also available:
 ```python
 gen.log_likelihood_y(y, phi=0.0)
 gen.log_likelihood_z(z, phi=0.0, theta=1.0)
+```
+
+### Epidemiology Dataset
+
+`load_epidemiology` returns the HPV prevalence and cervical-cancer incidence data from Plummer (2015) as a dictionary of NumPy arrays:
+
+```python
+from modular.dataloaders import load_epidemiology
+
+data = load_epidemiology()
+# data["y"] – HPV cases per study  (13,)
+# data["N"] – survey participants  (13,)
+# data["z"] – cancer cases         (13,)
+# data["P"] – population sizes     (13,)
 ```
 
 ## Development Workflow
