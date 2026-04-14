@@ -122,6 +122,40 @@ modular_bayes/
 └── README.md          # This file
 ```
 
+## Generating Synthetic Data
+
+The `modular.data` package provides classes for generating synthetic datasets used in the simulation studies.
+
+### Gaussian Mean-Shift Model
+
+`GaussianMeanShift` generates data from a two-module Gaussian model:
+
+$$Y_i \sim \mathcal{N}(\phi,\, \sigma_Y^2), \qquad Z_j \sim \mathcal{N}(\phi + \theta,\, \sigma_Z^2)$$
+
+```python
+from modular.data import GaussianMeanShift
+
+# Configure the data-generating process
+gen = GaussianMeanShift(
+    phi=0,        # shared location parameter
+    theta=1,      # mean-shift parameter
+    n_y=50,       # sample size for Y
+    n_z=50,       # sample size for Z
+    sigma_y=2,    # noise std dev for Y
+    sigma_z=1,    # noise std dev for Z
+)
+
+# Draw a reproducible dataset
+y, z = gen.sample(seed=123)
+```
+
+Log-likelihoods for each module are also available:
+
+```python
+gen.log_likelihood_y(y, phi=0.0)
+gen.log_likelihood_z(z, phi=0.0, theta=1.0)
+```
+
 ## Development Workflow
 
 1. Make changes to your R code
