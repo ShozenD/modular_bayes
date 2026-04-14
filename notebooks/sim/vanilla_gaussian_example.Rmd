@@ -1,0 +1,203 @@
+---
+title: "vanilla_gaussian_example"
+output: html_document
+---
+
+## Libraries
+```{r message=FALSE, warning=FALSE}
+library(dplyr)
+library(ggplot2)
+
+set_theme(theme_bw())
+```
+
+## Setup
+```{r}
+# True value of phi
+PHI <- 0
+THETA <- 1
+
+# Sample sizes for each dataset
+Y.n <- 50
+Z.n <- 50
+
+# Sample standard deviation
+Y.sd <- 2
+Z.sd <- 1
+```
+
+```{r}
+# Density values
+x <- seq(-8, 8, 0.01)
+Y.density <- dnorm(x, PHI, Y.sd)
+Z.density <- dnorm(x, PHI + THETA, Z.sd)
+```
+
+```{r}
+# Generate data
+set.seed(123)
+Y.data <- rnorm(Y.n, PHI, Y.sd)
+Z.data <- rnorm(Z.n, PHI + THETA, Z.sd)
+```
+
+
+```{r}
+df.density.Y <- data.frame(
+  x = x,
+  dataset = "Y",
+  f = Y.density
+)
+
+df.density.Z <- data.frame(
+  x = x,
+  dataset = "Z",
+  f = Z.density
+)
+
+df.density <- rbind(df.density.Y, df.density.Z)
+
+ggplot(df.density, aes(x, f)) +
+  geom_line(aes(color = dataset))
+```
+
+Generate samples from the first posterior
+```{r}
+PHI.post.mean <- mean(Y.data)
+PHI.post.sd <- Y.sd / sqrt(Y.n)
+
+PHI.post.samples <- rnorm(1000, PHI.post.mean, PHI.post.sd)
+
+dpost_phi <- function(x, y) {
+  post.mean <- mean(Y.data)
+  post.sd <- Y.sd / sqrt(Y.n)
+  
+  return(
+    dnorm(x, post.mean, post.sd)
+  )
+}
+```
+
+Conditioning on the posterior mean, generate samples from the conditional posterior of $\theta$
+```{r}
+#' Create posterior sampler for the conditional posterior of theta given phi
+#'
+#' @param z Observations from the second dataset
+#' @param phi The value of phi to condition on
+#'
+#' @returns A kernel that produces posterior samples of theta given phi
+rpost_theta_phi <- function(n, z, phi) {
+  post.mean <- mean(z) - phi
+  post.sd <- Z.sd / sqrt(Z.n)
+  
+  return(rnorm(n, post.mean, post.sd))
+}
+
+dpost_theta_phi <- function(x, z, phi) {
+  post.mean <- mean(z) - phi
+  post.sd <- Z.sd / sqrt(Z.n)
+  
+  return(dnorm(x, post.mean, post.sd))
+}
+```
+
+Choose 3 values of $\varphi$: closest to the posterior mean, moderate distance from the posterior mean, and very far from the posterior mean.
+```{r}
+# Closest to the mean
+idx <- which.min(abs(PHI.post.samples - PHI.mean))
+phi.min <- PHI.post.samples[idx]
+
+# Medium
+tmp <- PHI.post.samples[PHI.post.samples > PHI.mean]
+phi.mid <- median(tmp)
+
+# Maximum distance
+phi.max <- max(tmp)
+```
+
+```{r}
+x <- seq(-1, 2, 0.01)
+d.ref <- dpost_theta_phi(x, Z.data, PHI.post.mean)
+d.min <- dpost_theta_phi(x, Z.data, phi.min)
+d.mid <- dpost_theta_phi(x, Z.data, phi.mid)
+d.max <- dpost_theta_phi(x, Z.data, phi.max)
+```
+
+```{r}
+df_chart <- data.frame(
+  x = c(x, x),
+  type = c(rep("Proposal", length(x)), rep("Target", length(x))),
+  density = c(d.ref, d.min)
+)
+
+ggplot(df_chart, aes(x, density)) +
+  geom_line(aes(color = type))
+```
+
+```{r}
+df_chart <- data.frame(
+  x = c(x, x),
+  type = c(rep("Proposal", length(x)), rep("Target", length(x))),
+  density = c(d.ref, d.mid)
+)
+
+ggplot(df_chart, aes(x, density)) +
+  geom_line(aes(color = type))
+```
+
+```{r}
+df_chart <- data.frame(
+  x = c(x, x),
+  type = c(rep("Proposal", length(x)), rep("Target", length(x))),
+  density = c(d.ref, d.max)
+)
+
+ggplot(df_chart, aes(x, density)) +
+  geom_line(aes(color = type))
+```
+
+
+```{r}
+# Create conditional posterior kernels for each case
+post_theta_phi.samples.min <- rpost_theta_phi(1000, Z.data, phi.min)
+post_theta_phi.samples.mid <- rpost_theta_phi(1000, Z.data, phi.mid)
+post_theta_phi.samples.max <- rpost_theta_phi(1000, Z.data, phi.max)
+```
+
+```{r}
+is_weight_func_gen <- function(z, phi, phi_ref) {
+  zbar <- mean(z)
+  v <- Y.sd / sqrt(Y.n)
+  
+  is_weight_func <- function(theta) {
+    exp(
+      -1/(2*v) * ((phi - phi_ref)**2 + 2*(theta - zbar + phi_ref) * (phi - phi_ref))
+    )
+  }
+  
+  return(is_weight_func)
+}
+
+is_weight_func.min <- is_weight_func_gen(Z.data, phi.min, PHI.post.mean)
+is_weight_func.mid <- is_weight_func_gen(Z.data, phi.mid, PHI.post.mean)
+is_weight_func.max <- is_weight_func_gen(Z.data, phi.max, PHI.post.mean)
+```
+
+```{r}
+is_weight_func.mid(kernel.mid(100))
+```
+
+```{r}
+is_weight_func.max(kernel.max(100))
+```
+
+
+```{r}
+df.w <- data.frame(
+  theta = theta,
+  w = w
+)
+
+ggplot(df.w, aes(theta, w)) +
+  geom_line()
+```
+

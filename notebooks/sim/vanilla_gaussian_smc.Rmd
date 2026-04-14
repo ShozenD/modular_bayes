@@ -1,0 +1,281 @@
+---
+title: "vanilla_gaussian_example"
+output: html_document
+---
+
+## Libraries
+```{r message=FALSE, warning=FALSE}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+
+set_theme(theme_bw())
+```
+
+## Setup
+```{r}
+# True value of phi
+PHI <- 0
+THETA <- 2
+
+# Sample sizes for each data set
+Y.n <- 100
+Z.n <- 100
+
+# Sample standard deviation
+Y.sd <- 2
+Z.sd <- 1
+```
+
+```{r}
+# Density function
+x <- seq(-8, 8, 0.01)
+Y.density <- dnorm(x, PHI, Y.sd)
+Z.density <- dnorm(x, PHI + THETA, Z.sd)
+
+# Generate data
+set.seed(123)
+Y.data <- rnorm(Y.n, PHI, Y.sd)
+Z.data <- rnorm(Z.n, PHI + THETA, Z.sd)
+
+# ===== Plot the density functions and samples =====
+df_chart_density <- rbind(
+  data.frame(x = x, density = Y.density, dataset = "Y"),
+  data.frame(x = x, density = Z.density, dataset = "Z")
+)
+
+df_chart_points <- rbind(
+  data.frame(x = Y.data, dataset = "Y"),
+  data.frame(x = Z.data, dataset = "Z")
+)
+
+ggplot(df_chart_density, aes(x, density, color = dataset)) +
+  geom_line() +
+  geom_point(
+    data = df_chart_points,
+    aes(x, y = 0, color = dataset),
+    alpha = 0.3
+  ) +
+  theme(aspect.ratio = 1)
+```
+
+Generate samples from the first posterior
+```{r}
+PHI.post.mean <- mean(Y.data)
+PHI.post.sd <- Y.sd / sqrt(Y.n)
+
+dpost_phi <- function(x) dnorm(x, PHI.post.mean, PHI.post.sd)
+rpost_phi <- function(n) rnorm(n, PHI.post.mean, PHI.post.sd)
+```
+
+Conditioning on the posterior mean, generate samples from the conditional posterior of $\theta$
+```{r}
+dpost_theta_phi <- function(x, phi, log = FALSE) {
+  post.mean <- mean(Z.data) - phi
+  post.sd <- Z.sd / sqrt(Z.n)
+  
+  return(dnorm(x, post.mean, post.sd, log = log))
+}
+
+rpost_theta_phi <- function(n, phi) {
+  post.mean <- mean(Z.data) - phi
+  post.sd <- Z.sd / sqrt(Z.n)
+  
+  return(rnorm(n, post.mean, post.sd))
+}
+```
+
+## Stage 1 Inference
+For the SMC procedure, we choose the minimum value of $\varphi$ as the "representative" value and obtain samples from the conditional posterior of $\theta \mid \varphi$.
+
+```{r}
+# Obtain posterior samples from the first stage
+PHI.post.samples <- rpost_phi(1000)
+
+# Choose the minimum value as the representative value
+phi.star <- min(PHI.post.samples)
+
+# Obtain posterior samples from the conditional posterior
+init_samples <- rpost_theta_phi(1000, phi.star)
+phi_sequence <- sort(PHI.post.samples)
+```
+
+## Sequential Monte Carlo
+```{r}
+#' Multinomial Resampling
+#' Keeps track of indices to avoid heavy data copying until necessary.
+multinomial_resample <- function(weights, num_resamples = length(weights)) {
+  sample.int(
+    n = length(weights), 
+    size = num_resamples, 
+    replace = TRUE, 
+    prob = weights
+  )
+}
+
+#' Helper: Safe Log-Sum-Exp
+log_sum_exp <- function(x) {
+  max_x <- max(x)
+  max_x + log(sum(exp(x - max_x)))
+}
+
+#' MCMC Mutation Kernel (Metropolis-Hastings) with Multiple Steps
+mutate_particles <- function(samples, target_log_fn, step_size = 0.05, n_mcmc_steps = 5) {
+  N <- length(samples)
+  acceptances <- numeric(N) # Track how often each particle moves
+  
+  # Run MCMC for several steps to ensure particles reach the new target
+  for (k in 1:n_mcmc_steps) {
+    # 1. Propose new states
+    proposals <- samples + rnorm(N, mean = 0, sd = step_size)
+    
+    # 2. Evaluate target density
+    log_p_curr <- target_log_fn(samples)
+    log_p_prop <- target_log_fn(proposals)
+    
+    # 3. Calculate acceptance ratios
+    log_alpha <- log_p_prop - log_p_curr
+    
+    # 4. Accept/Reject
+    log_u <- log(runif(N))
+    accept_idx <- log_u < log_alpha
+    
+    # Update samples where accepted
+    samples[accept_idx] <- proposals[accept_idx]
+    
+    # Track acceptances
+    acceptances <- acceptances + as.integer(accept_idx)
+  }
+  
+  # Return mutated samples and overall acceptance rate
+  list(
+    samples = samples, 
+    accept_rate = mean(acceptances) / n_mcmc_steps
+  )
+}
+
+#' Calculate Effective Sample Size (ESS)
+calculate_ess <- function(normalized_weights) {
+  1 / sum(normalized_weights^2)
+}
+
+#' Main SMC Sampler with ESS Tracking
+smc <- function(
+    init_samples,
+    phi_sequence,
+    step_size = 0.05,
+    n_mcmc_steps = 5,
+    ess_threshold_ratio = 0.5
+) {
+  S <- length(phi_sequence)
+  N <- length(init_samples)
+  
+  # Trigger resample when ESS falls below this number (typically N/2)
+  ess_threshold <- ess_threshold_ratio * N
+  
+  # Pre-allocate dynamically
+  THETA_PHI <- matrix(NA, nrow = S, ncol = N)
+  THETA_PHI[1, ] <- init_samples
+  
+  curr_samples <- init_samples
+  
+  # 1. Initialize cumulative log weights equally
+  log_weights <- rep(-log(N), N) 
+  
+  for (s in 2:S) {
+    log_prev_fn <- function(x) dpost_theta_phi(x, phi_sequence[s - 1], log = TRUE)
+    log_curr_fn <- function(x) dpost_theta_phi(x, phi_sequence[s], log = TRUE)
+    
+    # --- REWEIGHT ---
+    # Calculate incremental weights: log(\pi_s(x) / \pi_{s-1}(x))
+    log_incremental_weights <- log_curr_fn(curr_samples) - log_prev_fn(curr_samples)
+    
+    # Add incremental weights to cumulative weights
+    log_weights <- log_weights + log_incremental_weights
+    
+    # Normalize weights safely
+    log_denom <- log_sum_exp(log_weights)
+    normalized_weights <- exp(log_weights - log_denom)
+    
+    # --- CHECK ESS ---
+    ess <- calculate_ess(normalized_weights)
+    
+    if (ess < ess_threshold) {
+      # --- RESAMPLE ---
+      resample_idx <- multinomial_resample(normalized_weights)
+      curr_samples <- curr_samples[resample_idx]
+      
+      # Reset cumulative weights to uniform after resampling
+      log_weights <- rep(-log(N), N)
+      
+      # --- MUTATE ---
+      # Rejuvenate particles to recover diversity
+      mutation_out <- mutate_particles(
+        samples = curr_samples,
+        target_log_fn = log_curr_fn,
+        step_size = step_size,
+        n_mcmc_steps = n_mcmc_steps
+      )
+      curr_samples <- mutation_out$samples
+      
+      message(sprintf("Step %d | Phi: %.3f | RESAMPLED (ESS: %.1f) | Accept Rate: %.1f%%", 
+                      s, phi_sequence[s], ess, mutation_out$accept_rate * 100))
+    } else {
+      # If ESS is healthy, we just carry the particles and weights forward!
+      message(sprintf("Step %d | Phi: %.3f | Skipped Resampling (ESS: %.1f)", 
+                      s, phi_sequence[s], ess))
+    }
+    
+    # Update state tracker
+    THETA_PHI[s, ] <- curr_samples
+  }
+  
+  return(THETA_PHI)
+}
+```
+
+```{r}
+theta_phi_samples <- smc(init_samples, phi_sequence, ess_threshold_ratio = 0.8)
+```
+
+```{r}
+# 1. Prepare theoretical density data
+dEP_theta <- function(x) {
+  post.mean <- mean(Z.data) - mean(Y.data)
+  post.sd <- Y.sd/sqrt(Y.n) + Z.sd/sqrt(Z.n)
+  
+  dnorm(x, post.mean, post.sd)
+}
+
+x_grid <- seq(-1, 3, length.out = 500)
+df_theory <- data.frame(
+  x = x_grid,
+  density = dEP_theta(x_grid)
+)
+
+# 2. Prepare samples data
+# Note: Apply some thinning
+df_samples <- data.frame(theta = as.vector(theta_phi_samples))
+
+# 3. Create the Density Comparison Plot
+ggplot() +
+  # Empirical SNIS Distribution (KDE)
+  geom_density(
+    data = df_samples,
+    aes(x = theta, fill = "SMC"),
+    alpha = 0.3,
+    color = "steelblue"
+  ) +
+  # Theoretical Target Density
+  geom_line(
+    data = df_theory,
+    aes(x = x, y = density, color = "Theoretical Target")
+  ) +
+  # Scale and Aesthetic adjustments
+  scale_fill_manual(name = "Distribution", values = c("SMC" = "steelblue")) +
+  scale_color_manual(name = "", values = c("Theoretical Target" = "darkred")) +
+  theme(legend.position = "bottom", aspect.ratio = 1)
+```
+
+
+

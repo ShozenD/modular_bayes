@@ -1,0 +1,132 @@
+---
+title: "liu_meta"
+output: html_document
+---
+
+```{r setup}
+library(dplyr)
+library(ggplot2)
+library(cmdstanr)
+library(bayesplot)
+
+REPO_DIR <- "~/Imperial/0_Research/modular_bayes/"
+```
+
+```{r experiment-config}
+set.seed(1234)
+
+config <- list(
+    n1 = 25,
+    n2 = 50,
+    mu = 0,
+    theta = 1,
+    s1 = 1,
+    s2 = 1
+)
+```
+
+```{r}
+# Function to generate data for the simulation study
+generate_data <- function(n1, n2, mu, theta, s1, s2) {
+    y1 <- rnorm(n1, mean = mu, sd = s1)
+    y2 <- rnorm(n2, mean = mu + theta, sd = s2)
+
+    return(list(y1 = y1, y2 = y2))
+}
+
+set.seed(1234)
+data <- generate_data(
+    n1 = config$n1,
+    n2 = config$n2,
+    mu = config$mu,
+    theta = config$theta,
+    s1 = config$s1,
+    s2 = config$s2
+)
+```
+
+```{r sanity-check}
+ggplot() +
+    geom_histogram(aes(x = data$y1), bins = 15, fill = "blue", alpha = 0.5) +
+    labs(title = "Histograms of Simulated Data", x = "Value", y = "Frequency") +
+    theme_bw()
+```
+
+```{r prepare-data-for-stan}
+stan_data <- list(
+    n1 = config$n1,
+    y1 = data$y1
+)
+```
+
+```{r fit-model}
+# Full posterior
+model_full <- cmdstan_model("../../stan/liu_m1.stan")
+fit_full <- model_full$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 1000,
+    seed = 1234,
+    show_messages=FALSE
+)
+```
+
+```{r}
+# Full posterior
+post_full <- fit_full$draws(format = "draws_matrix")
+sum_full <- fit_full$summary("mu")
+sum_full$post_type <- "full"
+
+post_draws_mu <- as.numeric(post_full[,"mu"])
+```
+
+```{r}
+stan_data <- list(
+  M = length(post_draws_mu),
+  mu_mean = mean(post_draws_mu),
+  mu_sd = sd(post_draws_mu),
+  mu = post_draws_mu
+)
+
+model_meta <- cmdstan_model("../../stan/liu_m1_meta.stan")
+fit_meta <- model_meta$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 1000,
+    seed = 1234,
+    show_messages=FALSE
+)
+```
+
+```{r posterior-summary}
+post_meta <- fit_meta$draws(format = "draws_matrix")
+sum_meta <- fit_meta$summary("mu_sup")
+sum_meta$post_type <- "meta"
+
+rbind(sum_full, sum_meta)
+```
+
+```{r posterior-plots}
+df_post_full <- data.frame(
+  post_type = "full",
+  mu = as.numeric(post_full[,"mu"])
+)
+
+df_post_meta <- data.frame(
+  post_type = "meta",
+  mu = as.numeric(post_meta[,"mu_sup"])
+)
+
+df_post <- rbind(df_post_full, df_post_meta)
+```
+
+```{r}
+ggplot(df_post, aes(mu, fill = post_type, color = post_type)) +
+  geom_density(alpha=0.7)
+```
+
+

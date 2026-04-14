@@ -1,0 +1,334 @@
+---
+title: "vanilla_gaussian_example"
+output: html_document
+---
+
+## Libraries
+```{r message=FALSE, warning=FALSE}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(loo)
+library(iwmm)
+
+set_theme(theme_bw())
+```
+
+## Setup
+```{r}
+# True value of phi
+PHI <- 0
+THETA <- 1
+
+# Sample sizes for each dataset
+Y.n <- 50
+Z.n <- 50
+
+# Sample standard deviation
+Y.sd <- 2
+Z.sd <- 1
+```
+
+```{r}
+# Density function
+x <- seq(-8, 8, 0.01)
+Y.density <- dnorm(x, PHI, Y.sd)
+Z.density <- dnorm(x, PHI + THETA, Z.sd)
+
+# Generate data
+set.seed(123)
+Y.data <- rnorm(Y.n, PHI, Y.sd)
+Z.data <- rnorm(Z.n, PHI + THETA, Z.sd)
+
+# Plot the density functions
+df_chart_density <- rbind(
+  data.frame(x = x, density = Y.density, dataset = "Y"),
+  data.frame(x = x, density = Z.density, dataset = "Z")
+)
+
+df_chart_points <- rbind(
+  data.frame(x = Y.data, dataset = "Y"),
+  data.frame(x = Z.data, dataset = "Z")
+)
+
+ggplot(df_chart_density, aes(x, density, color = dataset)) +
+  geom_line() +
+  geom_point(
+    data = df_chart_points,
+    aes(x, y = 0, color = dataset),
+    alpha = 0.3
+  ) +
+  theme(aspect.ratio = 1)
+```
+
+Generate samples from the first posterior
+```{r}
+PHI.post.mean <- mean(Y.data)
+PHI.post.sd <- Y.sd / sqrt(Y.n)
+
+dpost_phi <- function(x) dnorm(x, PHI.post.mean, PHI.post.sd)
+rpost_phi <- function(n) rnorm(n, PHI.post.mean, PHI.post.sd)
+```
+
+Conditioning on the posterior mean, generate samples from the conditional posterior of $\theta$
+```{r}
+dpost_theta_phi <- function(x, phi, log = FALSE) {
+  post.mean <- mean(Z.data) - phi
+  post.sd <- Z.sd / sqrt(Z.n)
+  
+  return(dnorm(x, post.mean, post.sd, log = log))
+}
+
+rpost_theta_phi <- function(n, phi) {
+  post.mean <- mean(Z.data) - phi
+  post.sd <- Z.sd / sqrt(Z.n)
+  
+  return(rnorm(n, post.mean, post.sd))
+}
+```
+
+Choose 3 values of $\varphi$: closest to the posterior mean, moderate distance from the posterior mean, and very far from the posterior mean.
+```{r}
+PHI.post.samples <- rpost_phi(1000)
+phi.star <- mean(PHI.post.samples)
+
+# Samples from the conditional posterior of theta given phi.star
+theta.phi_star <- rpost_theta_phi(1000, phi.star)
+
+# Closest to the mean
+idx <- which.min(abs(PHI.post.samples - phi.star))
+phi.min <- PHI.post.samples[idx]
+
+# Medium
+tmp <- PHI.post.samples[PHI.post.samples > phi.star]
+phi.mid <- median(tmp)
+
+# Maximum distance
+phi.max <- max(tmp)
+```
+
+## Self-Normalised Importance Sampling
+```{r}
+#' Compute the log ratio between the target and the proposal distributions
+compute_log_ratios <- function(samples, log_target_fn, log_proposal_fn) {
+  log_target_fn(samples) - log_proposal_fn(samples)
+}
+
+#' Compute Self-Normalized Importance Sampling Weights
+#' Uses the log-sum-exp trick for numerical stability.
+compute_snis_weights <- function(samples, log_target_fn, log_proposal_fn) {
+  
+  # 1. Compute unnormalized log weights
+  log_weights <- compute_log_ratios(samples, log_target_fn, log_proposal_fn)
+  
+  # 2. Log-Sum-Exp trick to prevent numerical overflow/underflow
+  max_log_w <- max(log_weights)
+  log_denom <- max_log_w + log(sum(exp(log_weights - max_log_w)))
+  
+  # 3. Return normalized weights
+  exp(log_weights - log_denom)
+}
+
+#' Multinomial Resampling
+#' Resamples the original samples based on importance weights.
+multinomial_resample <- function(samples, weights, num_resamples = NULL) {
+  
+  # Default to resampling the same number of particles we started with
+  n_samples <- if (is.matrix(samples) || is.data.frame(samples)) nrow(samples) else length(samples)
+  if (is.null(num_resamples)) num_resamples <- n_samples
+  
+  # Sample indices with replacement, weighted by our SNIS weights
+  resampled_indices <- sample.int(
+    n = length(weights), 
+    size = num_resamples, 
+    replace = TRUE, 
+    prob = weights
+  )
+  
+  # Return the subsetted samples
+  if (is.matrix(samples) || is.data.frame(samples)) {
+    return(samples[resampled_indices, , drop = FALSE])
+  } else {
+    return(samples[resampled_indices])
+  }
+}
+```
+
+```{r}
+# 1. Define your density wrappers
+log_target_density   <- function(x) dpost_theta_phi(x, phi.max, log = TRUE)
+log_proposal_density <- function(x) dpost_theta_phi(x, phi.star, log = TRUE)
+
+# 1.5 Compute log ratios between target and proposal (for PSIS)
+log_ratios <- compute_log_ratios(
+  samples = theta.phi_star,
+  log_target_fn = log_target_density,
+  log_proposal_fn = log_proposal_density
+)
+
+# 2. Compute the stable weights
+normalized_weights <- compute_snis_weights(
+  samples = theta.phi_star, 
+  log_target_fn = log_target_density, 
+  log_proposal_fn = log_proposal_density
+)
+
+# 3. Perform multinomial resampling
+resampled_theta <- multinomial_resample(
+  samples = theta.phi_star, 
+  weights = normalized_weights
+)
+```
+
+```{r}
+# Check PSIS LOO
+psis(log_ratios)
+```
+```{r}
+# 1. Prepare theoretical density data
+x_grid <- seq(0.25, 1.75, length.out = 500)
+df_theory <- data.frame(
+  x = x_grid,
+  density = dpost_theta_phi(x_grid, phi.min)
+)
+
+# 2. Prepare samples data
+df_samples <- data.frame(theta = resampled_theta)
+
+# 3. Create the Density Comparison Plot
+ggplot() +
+  # Empirical SNIS Distribution (KDE)
+  geom_density(
+    data = df_samples,
+    aes(x = theta, fill = "Empirical (SNIS)"),
+    alpha = 0.3,
+    color = "steelblue"
+  ) +
+  # Theoretical Target Density
+  geom_line(
+    data = df_theory,
+    aes(x = x, y = density, color = "Theoretical Target")
+  ) +
+  # Scale and Aesthetic adjustments
+  scale_fill_manual(name = "Distribution", values = c("Empirical (SNIS)" = "steelblue")) +
+  scale_color_manual(name = "", values = c("Theoretical Target" = "darkred")) +
+  theme(legend.position = "bottom", aspect.ratio = 1)
+```
+Even when PSIS loo is below the prescribed threshold, the SNIS gives a biased estimate of the true distribution.
+
+## Iterative Weighted Moment Matching
+When PSIS LOO is above prescribed threshold, we want to trigger IWMM
+```{r}
+# 1. Define your density wrappers
+log_target_density   <- function(draws) dpost_theta_phi(draws, phi.max, log = TRUE)
+log_proposal_density <- function(draws) dpost_theta_phi(draws, phi.star, log = TRUE)
+log_ratio <- function(draws) log_target_density(draws) - log_proposal_density(draws)
+
+resampled_theta <- moment_match(
+  x = as.matrix(theta.phi_star),
+  log_prob_prop_fun = log_proposal_density,
+  log_ratio_fun = log_ratio,
+  k_threshold = 0.7
+)
+resampled_theta <- resampled_theta$draws[,1]
+```
+
+```{r}
+# 1. Prepare theoretical density data
+x_grid <- seq(0.25, 1.75, length.out = 500)
+df_theory <- data.frame(
+  x = x_grid,
+  density = dpost_theta_phi(x_grid, phi.min)
+)
+
+# 2. Prepare samples data
+df_samples <- data.frame(theta = resampled_theta)
+
+# 3. Create the Density Comparison Plot
+ggplot() +
+  # Empirical SNIS Distribution (KDE)
+  geom_density(
+    data = df_samples,
+    aes(x = theta, fill = "Empirical (SNIS)"),
+    alpha = 0.3,
+    color = "steelblue"
+  ) +
+  # Theoretical Target Density
+  geom_line(
+    data = df_theory,
+    aes(x = x, y = density, color = "Theoretical Target")
+  ) +
+  # Scale and Aesthetic adjustments
+  scale_fill_manual(name = "Distribution", values = c("Empirical (SNIS)" = "steelblue")) +
+  scale_color_manual(name = "", values = c("Theoretical Target" = "darkred")) +
+  theme(legend.position = "bottom", aspect.ratio = 1)
+```
+
+
+```{r}
+psis_iwmm <- function(samples_s1, rep_val, k_threshold=0.7) {
+  S <- length(samples_s1)
+  
+  log_prop_fn <- function(draws) dpost_theta_phi(draws, phi.star, log = TRUE)
+  
+  SAMPLES_S2 <- matrix(NA, length(samples_s1), length(samples_s1))
+  for (s in 1:S) {
+    log_target_fn <- function(draws) dpost_theta_phi(draws, phi.max, log = TRUE)
+    log_ratio_fn <- function(draws) log_target_fm(draws) - log_prop_fn(draws)
+    
+    samples_s2 <- moment_match(
+      x = as.matrix(samples_s1),
+      log_prob_prop_fun = log_prop_fn,
+      log_ratio_fun = log_ratio,
+      k_threshold = 0.7
+    )
+    SAMPLES_S2[s,] <- samples_s2$draws[,1] 
+  }
+  
+  return(SAMPLES_S2)
+}
+
+sample_s2 <- as.vector(psis_iwmm(theta.phi_star, phi.star))
+```
+
+```{r}
+# 1. Prepare theoretical density data
+dEP_theta <- function(x) {
+  post.mean <- mean(Z.data) - mean(Y.data)
+  post.sd <- Y.sd/sqrt(Y.n) + Z.sd/sqrt(Z.n)
+  
+  dnorm(x, post.mean, post.sd)
+}
+
+x_grid <- seq(0.25, 1.75, length.out = 500)
+df_theory <- data.frame(
+  x = x_grid,
+  density = dEP_theta(x_grid)
+)
+
+# 2. Prepare samples data
+# Note: Apply some thinning
+df_samples <- data.frame(theta = sample(sample_s2, size=1000))
+
+# 3. Create the Density Comparison Plot
+ggplot() +
+  # Empirical SNIS Distribution (KDE)
+  geom_density(
+    data = df_samples,
+    aes(x = theta, fill = "PSIS + IWMM"),
+    alpha = 0.3,
+    color = "steelblue"
+  ) +
+  # Theoretical Target Density
+  geom_line(
+    data = df_theory,
+    aes(x = x, y = density, color = "Theoretical Target")
+  ) +
+  # Scale and Aesthetic adjustments
+  scale_fill_manual(name = "Distribution", values = c("PSIS + IWMM" = "steelblue")) +
+  scale_color_manual(name = "", values = c("Theoretical Target" = "darkred")) +
+  theme(legend.position = "bottom", aspect.ratio = 1)
+```
+
+
+

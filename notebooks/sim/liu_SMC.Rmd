@@ -1,0 +1,374 @@
+---
+title: "Liu (2009) Simulation Study"
+author: "Shozen Dan"
+date: "2025-11-23"
+output: html_document
+---
+
+```{r setup}
+library(dplyr)
+library(ggplot2)
+library(cmdstanr)
+library(bayesplot)
+library(mvtnorm)
+library(purrr)
+
+REPO_DIR <- "~/Imperial/0_Research/modular_bayes/"
+```
+
+```{r experiment-config}
+set.seed(1234)
+
+config <- list(
+  n1 = 25,
+  n2 = 50,
+  mu = 0,
+  theta = 1,
+  s1 = 1,
+  s2 = 1
+)
+```
+
+```{r}
+# Function to generate data for the simulation study
+generate_data <- function(n1, n2, mu, theta, s1, s2) {
+  y1 <- rnorm(n1, mean = mu, sd = s1)
+  y2 <- rnorm(n2, mean = mu + theta, sd = s2)
+
+  return(list(y1 = y1, y2 = y2))
+}
+
+set.seed(1234)
+data <- generate_data(
+  n1 = config$n1,
+  n2 = config$n2,
+  mu = config$mu,
+  theta = config$theta,
+  s1 = config$s1,
+  s2 = config$s2
+)
+```
+
+```{r sanity-check}
+ggplot() +
+  geom_histogram(aes(x = data$y1), bins = 10, fill = "blue", alpha = 0.5) +
+  geom_histogram(aes(x = data$y2), bins = 10, fill = "red", alpha = 0.5) +
+  labs(title = "Histograms of Simulated Data", x = "Value", y = "Frequency") +
+  theme_bw()
+```
+
+## Fit a model on the first dataset
+```{r message=FALSE}
+stan_data <- list(
+  n1 = config$n1,
+  y1 = data$y1
+)
+
+model_m1 <- cmdstan_model("../../stan/liu_m1.stan")
+fit_m1 <- model_m1$sample(
+  data = stan_data,
+  chains = 4,
+  parallel_chains = 4,
+  iter_warmup = 500,
+  iter_sampling = 500,
+  seed = 1234,
+  show_messages = FALSE
+)
+```
+
+Summary of the posterior on the first model.
+```{r}
+summary_m1 <- fit_m1$summary("mu")
+mu_m1_mean <- summary_m1$mean
+mu_m1_median <- summary_m1$median
+
+print(summary_m1)
+```
+
+## Fit a full model in Stan
+```{r prepare-data-for-stan}
+stan_data <- list(
+  n1 = config$n1,
+  n2 = config$n2,
+  y1 = data$y1,
+  y2 = data$y2
+)
+```
+
+```{r fit-model, message=FALSE}
+model_full <- cmdstan_model("../../stan/liu_full.stan")
+fit_full <- model_full$sample(
+  data = stan_data,
+  chains = 4,
+  parallel_chains = 4,
+  iter_warmup = 500,
+  iter_sampling = 500,
+  seed = 1234,
+  show_messages = FALSE
+)
+```
+
+Print the posterior summaries for $\mu$ and $\theta$.
+```{r posterior-summary}
+post_full <- fit_full$draws()
+summary_full <- fit_full$summary(c("mu", "theta"))
+
+print(summary_full)
+```
+
+### Importance sampling step
+1. Compute the weights for each sample in the MCMC
+2. Self-normalise the weights
+3. Multi-nomial resampling
+
+```{r}
+# Extract posterior draws as numeric vectors
+mu_draws <- as.numeric(post_full[, , "mu"])
+theta_draws <- as.numeric(post_full[, , "theta"])
+
+# Create particle matrix for cleaner interface
+particles <- cbind(
+  mu = mu_draws,
+  tilde_theta = theta_draws, # Create an auxiliary parameter
+  theta = theta_draws
+)
+```
+
+```{r}
+source("../../R/liu/compute_log_weights.R")
+source("../../R/liu/is_resample.R")
+source("../../R/liu/log_posterior.R")
+source("../../R/liu/mh_step.R")
+source("../../R/liu/rejuvenate.R")
+source("../../R/liu/smc_step.R")
+source("../../R/liu/run_smc.R")
+```
+
+## Run Full SMC Algorithm
+### Execute SMC over the complete tempering schedule
+```{r run-full-smc}
+# Run complete SMC algorithm
+smc_full_result <- run_smc(
+  particles_init = particles,
+  y1 = data$y1,
+  y2 = data$y2,
+  s1 = config$s1,
+  s2 = config$s2,
+  eta_schedule = c(1,0.5,0.3,0.2,0.1,0.05,0.01,0.001,0.0001,1e-5,0),
+  n_mh_steps = 100,
+  proposal_sd = 1,
+  verbose = TRUE
+)
+```
+
+### Compare with full Stan posterior
+```{r compare-results}
+# Extract final SMC particles
+final_particles <- smc_full_result$final_particles
+
+# Compare with Stan results
+cat("=== Comparison: SMC vs Stan Full Model ===\n\n")
+
+cat("Stan (full data from start):\n")
+cat(sprintf(
+  "  Mu:    mean=%.4f, sd=%.4f\n",
+  mean(mu_draws), sd(mu_draws)
+))
+cat(sprintf(
+  "  Theta: mean=%.4f, sd=%.4f\n\n",
+  mean(theta_draws), sd(theta_draws)
+))
+
+cat("SMC (sequential tempering):\n")
+cat(sprintf(
+  "  Mu:    mean=%.4f, sd=%.4f\n",
+  mean(final_particles[, "mu"]), sd(final_particles[, "mu"])
+))
+cat(sprintf(
+  "  Theta: mean=%.4f, sd=%.4f\n\n",
+  mean(final_particles[, "theta"]), sd(final_particles[, "theta"])
+))
+
+# Print summary statistics table
+cat("=== Summary Statistics Across Tempering Steps ===\n\n")
+print(smc_full_result$summary_stats, digits = 4)
+```
+
+### Visualize SMC evolution
+Theoretically ideal mu and theta
+```{r}
+mu_ideal <- mean(data$y1)
+mu_sd_ideal <- var(data$y1) / config$n1
+
+rho <- var(data$y2) * 0.5**2 /(var(data$y2)/config$n2 + 0.5**2)
+theta_ideal <- rho*(mean(data$y2) - mu_ideal)
+theta_sd_ideal <- rho / config$n2
+```
+
+```{r visualize-smc-evolution, fig.width=12, fig.height=10}
+# Plot evolution of posterior estimates
+par(mfrow = c(2, 3))
+
+# Plot 1: Mu mean trajectory
+plot(smc_full_result$summary_stats$step,
+  smc_full_result$summary_stats$mu_mean,
+  type = "b", pch = 16, col = "blue",
+  xlab = "SMC Step", ylab = "Mean of Mu",
+  main = "Evolution of Mu Mean",
+  ylim = c(-.3, 0.01)
+)
+abline(h = mean(mu_draws), col = "red", lty = 2, lwd = 2)
+abline(h = config$mu, col = "green", lty = 2, lwd = 2)
+abline(h = mu_ideal, col = "orange", lty = 2, lwd = 2)
+legend("topright",
+  legend = c("SMC", "Stan", "True", "Ideal"),
+  col = c("blue", "red", "green", "orange"),
+  lty = c(1, 2, 2, 2), pch = c(16, NA, NA, NA)
+)
+
+# Plot 2: Theta mean trajectory
+plot(smc_full_result$summary_stats$step,
+  smc_full_result$summary_stats$theta_mean,
+  type = "b", pch = 16, col = "blue",
+  xlab = "SMC Step", ylab = "Mean of Theta",
+  main = "Evolution of Theta Mean",
+  ylim = c(0, 1.2)
+)
+abline(h = mean(theta_draws), col = "red", lty = 2, lwd = 2)
+abline(h = config$theta, col = "green", lty = 2, lwd = 2)
+abline(h = theta_ideal, col = "orange", lty = 2, lwd = 2)
+legend("topright",
+  legend = c("SMC", "Stan", "True", "Ideal"),
+  col = c("blue", "red", "green", "orange"),
+  lty = c(1, 2, 2), pch = c(16, NA, NA)
+)
+
+# Plot 3: Eta schedule
+plot(smc_full_result$summary_stats$step,
+  smc_full_result$summary_stats$eta,
+  type = "b", pch = 16, col = "darkgreen",
+  xlab = "SMC Step", ylab = "Eta (Tempering Parameter)",
+  main = "Tempering Schedule"
+)
+
+# Plot 4: Mu SD trajectory
+plot(smc_full_result$summary_stats$step,
+  smc_full_result$summary_stats$mu_sd,
+  type = "b", pch = 16, col = "blue",
+  xlab = "SMC Step", ylab = "SD of Mu",
+  main = "Evolution of Mu SD",
+  ylim = c(0, 0.4)
+)
+abline(h = sd(mu_draws), col = "red", lty = 2, lwd = 2)
+abline(h = mu_sd_ideal, col = "orange", lty = 2, lwd = 2)
+legend("topright",
+  legend = c("SMC", "Stan", "Ideal"),
+  col = c("blue", "red", "orange"),
+  lty = c(1, 2, 2), pch = c(16, NA, NA)
+)
+
+# Plot 5: Theta SD trajectory
+plot(smc_full_result$summary_stats$step,
+  smc_full_result$summary_stats$theta_sd,
+  type = "b", pch = 16, col = "blue",
+  xlab = "SMC Step", ylab = "SD of Theta",
+  main = "Evolution of Theta SD",
+  ylim = c(0, 0.4)
+)
+abline(h = sd(theta_draws), col = "red", lty = 2, lwd = 2)
+abline(h = theta_sd_ideal, col = "orange", lty = 2, lwd = 2)
+legend("topright",
+  legend = c("SMC", "Stan", "Ideal"),
+  col = c("blue", "red", "orange"),
+  lty = c(1, 2, 2), pch = c(16, NA, NA)
+)
+
+# Plot 6: Combined trajectory in parameter space
+plot(smc_full_result$summary_stats$mu_mean,
+  smc_full_result$summary_stats$theta_mean,
+  type = "b", pch = 16, col = "blue",
+  xlab = "Mean of Mu", ylab = "Mean of Theta",
+  main = "SMC Trajectory in Parameter Space"
+)
+points(mean(mu_draws), mean(theta_draws), col = "red", pch = 17, cex = 2)
+points(config$mu, config$theta, col = "green", pch = 18, cex = 2)
+text(smc_full_result$summary_stats$mu_mean,
+  smc_full_result$summary_stats$theta_mean,
+  labels = 0:10, pos = 3, cex = 0.7, col = "blue"
+)
+legend("topright",
+  legend = c("SMC path", "Stan", "True"),
+  col = c("blue", "red", "green"),
+  pch = c(16, 17, 18)
+)
+
+par(mfrow = c(1, 1))
+```
+
+### Compare distributions at key steps
+```{r compare-distributions, fig.width=12, fig.height=8}
+# Plot histograms at eta = 1, 0.5, and 0
+par(mfrow = c(2, 3))
+
+# Eta = 1 (step 0)
+step_idx <- 1
+hist(smc_full_result$particle_history[[step_idx]][, "mu"],
+  breaks = 30, col = rgb(0, 0, 1, 0.5),
+  main = sprintf("Mu at eta=%.1f", smc_full_result$eta_schedule[step_idx]),
+  xlab = "mu", freq = FALSE
+)
+lines(density(mu_draws), col = "red", lwd = 2)
+
+hist(smc_full_result$particle_history[[step_idx]][, "theta"],
+  breaks = 30, col = rgb(0, 0, 1, 0.5),
+  main = sprintf("Theta at eta=%.1f", smc_full_result$eta_schedule[step_idx]),
+  xlab = "theta", freq = FALSE
+)
+lines(density(theta_draws), col = "red", lwd = 2)
+
+# Eta = 0.5 (step 5)
+step_idx <- 6
+hist(smc_full_result$particle_history[[step_idx]][, "mu"],
+  breaks = 30, col = rgb(0, 0, 1, 0.5),
+  main = sprintf("Mu at eta=%.1f", smc_full_result$eta_schedule[step_idx]),
+  xlab = "mu", freq = FALSE
+)
+lines(density(mu_draws), col = "red", lwd = 2)
+
+hist(smc_full_result$particle_history[[step_idx]][, "theta"],
+  breaks = 30, col = rgb(0, 0, 1, 0.5),
+  main = sprintf("Theta at eta=%.1f", smc_full_result$eta_schedule[step_idx]),
+  xlab = "theta", freq = FALSE
+)
+lines(density(theta_draws), col = "red", lwd = 2)
+
+# Eta = 0 (final step)
+step_idx <- 11
+hist(smc_full_result$particle_history[[step_idx]][, "mu"],
+  breaks = 30, col = rgb(0, 0, 1, 0.5),
+  main = sprintf("Mu at eta=%.1f (final)", smc_full_result$eta_schedule[step_idx]),
+  xlab = "mu", freq = FALSE
+)
+lines(density(mu_draws), col = "red", lwd = 2)
+legend("topright",
+  legend = c("SMC", "Stan"),
+  fill = c(rgb(0, 0, 1, 0.5), NA),
+  border = c("black", NA),
+  lty = c(NA, 1), col = c(NA, "red"), lwd = c(NA, 2)
+)
+
+hist(smc_full_result$particle_history[[step_idx]][, "theta"],
+  breaks = 30, col = rgb(0, 0, 1, 0.5),
+  main = sprintf("Theta at eta=%.1f (final)", smc_full_result$eta_schedule[step_idx]),
+  xlab = "theta", freq = FALSE
+)
+lines(density(theta_draws), col = "red", lwd = 2)
+legend("topright",
+  legend = c("SMC", "Stan"),
+  fill = c(rgb(0, 0, 1, 0.5), NA),
+  border = c("black", NA),
+  lty = c(NA, 1), col = c(NA, "red"), lwd = c(NA, 2)
+)
+
+par(mfrow = c(1, 1))
+```

@@ -1,0 +1,375 @@
+---
+title: "Liu (2009) Simulation Study"
+author: "Shozen Dan"
+date: "2025-11-23"
+output: html_document
+---
+
+```{r setup}
+library(dplyr)
+library(ggplot2)
+library(cmdstanr)
+library(bayesplot)
+
+REPO_DIR <- "~/Imperial/0_Research/modular_bayes/"
+```
+
+```{r experiment-config}
+set.seed(1234)
+
+config <- list(
+    n1 = 25,
+    n2 = 50,
+    mu = 0,
+    theta = 1,
+    s1 = 1,
+    s2 = 1
+)
+```
+
+```{r}
+# Function to generate data for the simulation study
+generate_data <- function(n1, n2, mu, theta, s1, s2) {
+    y1 <- rnorm(n1, mean = mu, sd = s1)
+    y2 <- rnorm(n2, mean = mu + theta, sd = s2)
+
+    return(list(y1 = y1, y2 = y2))
+}
+
+set.seed(1234)
+data <- generate_data(
+    n1 = config$n1,
+    n2 = config$n2,
+    mu = config$mu,
+    theta = config$theta,
+    s1 = config$s1,
+    s2 = config$s2
+)
+```
+
+```{r sanity-check}
+ggplot() +
+    geom_histogram(aes(x = data$y1), bins = 15, fill = "blue", alpha = 0.5) +
+    geom_histogram(aes(x = data$y2), bins = 15, fill = "red", alpha = 0.5) +
+    labs(title = "Histograms of Simulated Data", x = "Value", y = "Frequency") +
+    theme_bw()
+```
+
+```{r prepare-data-for-stan}
+stan_data <- list(
+    n1 = config$n1,
+    n2 = config$n2,
+    y1 = data$y1,
+    y2 = data$y2
+)
+```
+
+```{r fit-model, message=FALSE}
+model <- cmdstan_model("../../stan/liu.stan")
+fit <- model$sample(
+    data = stan_data,
+    chains = 4,
+    parallel_chains = 4,
+    iter_warmup = 1000,
+    iter_sampling = 1000,
+    seed = 1234
+)
+```
+
+```{r posterior-summary}
+posterior <- fit$draws()
+summary <- fit$summary()
+print(summary)
+```
+
+```{r posterior-plots}
+mcmc_areas(posterior, pars = c("mu", "theta"))
+```
+
+```{r}
+# Extract posterior draws
+mu_draws <- as.numeric(posterior[,,"mu"])
+theta_draws <- as.numeric(posterior[,,"theta"])
+```
+
+```{r}
+# Analytically derived density function
+library(mvtnorm)
+cond_loglik_m2_true <- function(mu) {
+  n2 <- length(data$y2)
+  one_n2 <- rep(1, n2)
+  S <- diag(n2) + 0.5 * one_n2 %o% one_n2 
+  dmvnorm(data$y2, mean = rep(mu, n2), sigma = S, log = TRUE)
+}
+```
+
+```{r}
+# Plot the true (log) conditional marginal probability
+{
+  x <- seq(-3, 3, 1e-3)
+  log_p_true <- sapply(x, cond_loglik_m2_true)
+  
+  plot(x, log_p_true, type = "l", xlab = "theta", ylab = "log(p)")
+  abline(v = mean(data$y2), col=2)
+}
+```
+
+```{r}
+# Plot the true (log) un-normalized weights
+{
+  x <- seq(-3, 3, 1e-3)
+  log_p_true <- sapply(x, cond_loglik_m2_true)
+  
+  plot(x, -log_p_true, type = "l", xlab = "theta", ylab = "log(p)")
+  abline(v = mean(data$y2), col=2)
+}
+```
+
+```{r}
+# Sample from the prior of theta
+M <- 3000
+theta_prior_draws <- rnorm(M, 0, sqrt(0.5))
+```
+
+```{r}
+# Precompute data and sizes once
+y2   <- data$y2
+n2   <- length(y2)
+N_mu <- length(mu_draws)
+M_th <- length(theta_prior_draws)
+
+# Conditional log-likelihood with sigma = I
+cond_loglik_m2 <- function(mu, theta) {
+  mean_val <- mu + theta
+  sum(dnorm(data$y2, mean = mean_val, sd = 1, log = TRUE))
+}
+
+log_mean_exp <- function(logx) {
+  # log( mean(exp(logx)) ) computed stably
+  m <- max(logx)
+  m + log(mean(exp(logx - m)))
+}
+
+log_p <- vapply(
+  mu_draws,
+  FUN = function(mu_i) {
+    # log-likelihoods over theta for this mu_i
+    log_vals <- vapply(
+      theta_prior_draws,
+      FUN       = function(th) cond_loglik_m2(mu_i, th),
+      FUN.VALUE = numeric(1L)
+    )
+    # log p(y2 | mu_i) ≈ log(1/M ∑ exp(log_vals))
+    log_mean_exp(log_vals)
+  },
+  FUN.VALUE = numeric(1L)
+)
+```
+
+```{r}
+log_w = -log_p
+log_sum_w <- matrixStats::logSumExp(log_w)
+
+w_tilde <- exp(log_w - log_sum_w)
+
+# Re-sample the posterior draws using importance sampling weights
+{
+  post_draws <- cbind(mu_draws, theta_draws)
+  ix <- seq(1, nrow(post_draws))
+
+  ix_redraw <- sample(ix, replace=TRUE, prob=w_tilde)
+
+  post_redraws <- post_draws[ix_redraw,]
+}
+```
+
+```{r}
+cat(sprintf("Full      E[mu]:     %.4f\n", mean(mu_draws)))
+cat(sprintf("Corrected E[mu]:     %.4f\n", mean(post_redraws[,1])))
+
+cat(sprintf("Full      V[mu]:     %.4f\n", var(mu_draws)))
+cat(sprintf("Corrected V[mu]:     %.4f\n", var(post_redraws[,1])))
+
+cat(sprintf("Full      E[theta]:  %.4f\n", mean(theta_draws)))
+cat(sprintf("Corrected E[theta]:  %.4f\n", mean(post_redraws[,2])))
+
+cat(sprintf("Full      V[theta]:  %.4f\n", var(theta_draws)))
+cat(sprintf("Corrected V[theta]:  %.4f\n", var(post_redraws[,2])))
+```
+
+```{r}
+breaks <- pretty(c(mu_draws, post_redraws[,1]), n = 30)
+
+hist(mu_draws,
+     col = rgb(1, 0, 0, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     main = "Posterior of mu: Before vs After",
+     xlab = "mu")
+
+hist(post_redraws[,1],
+     col = rgb(0, 0, 1, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     add = TRUE)
+```
+```{r}
+breaks <- pretty(c(theta_draws, post_redraws[,2]), n = 30)
+
+hist(theta_draws,
+     col = rgb(1, 0, 0, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     main = "Posterior of theta: Before vs After",
+     xlab = "mu")
+
+hist(post_redraws[,2],
+     col = rgb(0, 0, 1, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     add = TRUE)
+```
+
+Try the importance sampling with the analytically derived marginal.
+```{r}
+# Calculate log conditional marginal probability
+log_p <- vapply(
+  mu_draws,
+  FUN = function(mu_i) {
+    log_vals <- cond_loglik_m2_true(mu_i)
+    log_mean_exp(log_vals)
+  },
+  FUN.VALUE = numeric(1L)
+)
+
+# Calculate importance sampling weights
+log_w = -log_p
+log_sum_w <- matrixStats::logSumExp(log_w)
+w_tilde <- exp(log_w - log_sum_w)
+
+# Re-sample the posterior draws using importance sampling weights
+{
+  post_draws <- cbind(mu_draws, theta_draws)
+  ix <- seq(1, nrow(post_draws))
+
+  ix_redraw <- sample(ix, replace=TRUE, prob=w_tilde)
+
+  post_redraws <- post_draws[ix_redraw,]
+}
+```
+
+```{r}
+cat(sprintf("Full      E[mu]:     %.4f\n", mean(mu_draws)))
+cat(sprintf("Corrected E[mu]:     %.4f\n", mean(post_redraws[,1])))
+
+cat(sprintf("Full      V[mu]:     %.4f\n", var(mu_draws)))
+cat(sprintf("Corrected V[mu]:     %.4f\n", var(post_redraws[,1])))
+
+cat(sprintf("Full      E[theta]:  %.4f\n", mean(theta_draws)))
+cat(sprintf("Corrected E[theta]:  %.4f\n", mean(post_redraws[,2])))
+
+cat(sprintf("Full      V[theta]:  %.4f\n", var(theta_draws)))
+cat(sprintf("Corrected V[theta]:  %.4f\n", var(post_redraws[,2])))
+```
+
+```{r}
+breaks <- pretty(c(mu_draws, post_redraws[,1]), n = 30)
+
+hist(mu_draws,
+     col = rgb(1, 0, 0, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     main = "Posterior of mu: Before vs After",
+     xlab = "mu")
+
+hist(post_redraws[,1],
+     col = rgb(0, 0, 1, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     add = TRUE)
+```
+```{r}
+breaks <- pretty(c(theta_draws, post_redraws[,2]), n = 30)
+
+hist(theta_draws,
+     col = rgb(1, 0, 0, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     main = "Posterior of theta: Before vs After",
+     xlab = "mu")
+
+hist(post_redraws[,2],
+     col = rgb(0, 0, 1, 0.5),
+     border = NA,
+     freq = FALSE,
+     breaks = breaks,
+     add = TRUE)
+```
+
+```{r}
+sigma2_theta <- 0.5      # prior variance of θ (single source of truth)
+y2 <- data$y2
+n2 <- length(y2)
+
+# Theoretical log p(y2 | μ) using the same sigma2_theta
+cond_loglik_m2_true <- function(mu) {
+  one_n2 <- rep(1, n2)
+  S <- diag(n2) + sigma2_theta * (one_n2 %o% one_n2)
+  dmvnorm(y2, mean = rep(mu, n2), sigma = S, log = TRUE)
+}
+
+# Monte Carlo log p(y2 | μ) – your code, but using sigma2_theta explicitly
+M <- 3000
+theta_prior_draws <- rnorm(M, 0, sqrt(sigma2_theta))
+
+cond_loglik_m2 <- function(mu, theta) {
+  mean_val <- mu + theta
+  sum(dnorm(y2, mean = mean_val, sd = 1, log = TRUE))
+}
+
+log_mean_exp <- function(logx) {
+  m <- max(logx)
+  m + log(mean(exp(logx - m)))
+}
+
+log_p_mc <- vapply(
+  mu_draws,
+  FUN = function(mu_i) {
+    log_vals <- vapply(
+      theta_prior_draws,
+      FUN       = function(th) cond_loglik_m2(mu_i, th),
+      FUN.VALUE = numeric(1L)
+    )
+    log_mean_exp(log_vals)
+  },
+  FUN.VALUE = numeric(1L)
+)
+
+# Theoretical values at the *same* μ's
+log_p_true <- vapply(mu_draws, cond_loglik_m2_true, numeric(1L))
+
+# Compare after standardising (kills any affine differences)
+log_p_mc_centered   <- (log_p_mc   - mean(log_p_mc))   / sd(log_p_mc)
+log_p_true_centered <- (log_p_true - mean(log_p_true)) / sd(log_p_true)
+
+plot(
+  mu_draws, log_p_true_centered,
+  pch = 16, cex = 0.4, col = "grey40",
+  xlab = "mu", ylab = "z-scored log p(y2 | mu)"
+)
+points(mu_draws, log_p_mc_centered, pch = 1, cex = 0.4, col = "blue")
+abline(h = 0, lty = 3)
+
+cat("Correlation: ",
+    cor(log_p_true_centered, log_p_mc_centered),
+    "\n")
+
+```
+

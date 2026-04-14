@@ -1,0 +1,139 @@
+---
+title: "epidemiology"
+output: html_document
+---
+
+```{r message=FALSE}
+library(dplyr)
+library(data.table)
+library(cmdstanr)
+
+library(ggplot2)
+set_theme(theme_bw())
+```
+
+Defining the data. Taken from the Supplementary materials of Plummer (2015)
+```{r}
+# Number of HPV cases
+y <- c(7, 6, 10, 10, 1, 1, 10, 4, 35, 0, 10, 8, 4)
+
+# Number of participants in the HPV prevalence survey
+N <- c(111, 71, 162, 188, 145, 215, 166, 37, 173, 143, 229, 696, 93)
+
+# Number of cases of cervical cancer
+z <- c(16, 215, 362, 97, 76, 62, 710, 56, 133, 28, 62, 413, 194)
+
+# The population size covered by the cancer
+Npop <- c(26983, 250930, 829348, 157775, 150467, 352445, 553066, 26751, 75815, 150302, 354993, 3683043, 507218)
+T_per_thousand <- Npop / 1000
+```
+
+## Full Bayesian Model
+We begin by fitting a full Bayesian model.
+```{r}
+# Prepare Stan data
+stan_data <- list(
+  n = length(y),
+  N = N,
+  T = T_per_thousand,
+  y = y,
+  z = z
+)
+
+# Compile Stan model
+model_full <- cmdstan_model(stan_file = "../../stan/epidemiology_full.stan")
+
+# Run MCMC
+fit_full <- model_full$sample(
+  data = stan_data,
+  seed = 42,
+  iter_warmup = 500,
+  iter_sampling = 1000,
+  chains = 4,
+  show_messages = FALSE
+)
+```
+
+Check diagnostics
+```{r}
+fit_full$summary(c("theta1", "theta2"))
+```
+
+Extract the posterior samples for $\theta_1$ and $\theta_2$ and plot their scatter plot.
+```{r}
+post_full <- fit_full$draws(c("theta1", "theta2"), format = "draws_matrix")
+dt_post_full <- data.table(post_full, keep.rownames = TRUE)
+```
+
+```{r}
+# Visualize the full posterior
+ggplot(dt_post_full, aes(theta1, theta2)) +
+  geom_point()
+```
+
+## Posterior as data approach
+First, we fit the Binomial model to the first dataset
+```{r}
+stan_data <- list(
+  n = length(y),
+  N = N,
+  y = y
+)
+
+model_m1 <- cmdstan_model(stan_file = "../../stan/epidemiology_m1.stan")
+
+fit_m1 <- model_m1$sample(
+  data = stan_data,
+  seed = 42,
+  iter_warmup = 500,
+  iter_sampling = 3000,
+  chains = 4,
+  show_messages = FALSE
+)
+```
+
+Fit second stage model
+```{r}
+phi <- as.matrix(fit_m1$draws("phi", format="draws_matrix"))
+
+# Create stan data
+stan_data <- list(
+  n = length(z),
+  M = nrow(phi),
+  post_phi = phi,
+  T = T_per_thousand,
+  z = z
+)
+
+# Compile Stan model
+model_m2 <- cmdstan_model(stan_file = "../../stan/epidemiology_m2_cut.stan")
+
+# Run MCMC
+fit_m2 <- model_m2$sample(
+  data = stan_data,
+  seed = 42,
+  iter_warmup = 500,
+  iter_sampling = 1000,
+  chains = 4,
+  show_messages = TRUE
+)
+```
+
+Sanity check.
+```{r}
+fit_m2$summary(c("theta1", "theta2"))
+```
+
+```{r}
+post_meta <- fit_m2$draws(c("theta1", "theta2"), format = "draws_matrix")
+dt_post_meta <- data.table(post_meta, keep.rownames = TRUE)
+```
+
+```{r}
+# Visualize the full posterior
+ggplot(dt_post_full, aes(theta1, theta2)) +
+  geom_point() +
+  geom_point(data = dt_post_meta, color = 2) +
+  theme(aspect.ratio = 1)
+```
+
